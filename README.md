@@ -1,5 +1,8 @@
 # DailyPro
 [![Laravel](https://github.com/EzeArcich/TaskForge/actions/workflows/laravel.yml/badge.svg?branch=master)](https://github.com/EzeArcich/TaskForge/actions/workflows/laravel.yml)
+![license](https://img.shields.io/github/license/EzeArcich/TaskForge)
+![php](https://img.shields.io/badge/php-8.2%2B-blue)
+![laravel](https://img.shields.io/badge/laravel-12-red)
 
 **"Copio-pego un roadmap -> el sistema me crea calendario + tablero + recordatorios."**
 
