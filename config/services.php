@@ -34,5 +34,13 @@ return [
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
+    'openai' => [
+        'api_key' => env('OPENAI_API_KEY'),
+    ],
+    'treello' => [
+        'trello_key' => env('TRELLO_KEY'),
+        'trello_token' => env('TRELLO_TOKEN'),
+        'trello_webhook_secret' => env('TRELLO_WEBHOOK_SECRET'),
+    ],
 
 ];
