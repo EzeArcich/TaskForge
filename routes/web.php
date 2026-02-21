@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Integration;
 use Illuminate\Support\Facades\Route;
 use Laravel\Socialite\Facades\Socialite;
 
@@ -8,10 +9,14 @@ Route::get('/', function () {
 });
 
 
-
 Route::get('/auth/google', function () {
     return Socialite::driver('google')
-        ->scopes(['https://www.googleapis.com/auth/calendar.events'])
+        ->scopes([
+            'openid',
+            'email',
+            'profile',
+            'https://www.googleapis.com/auth/calendar.events',
+        ])
         ->with(['access_type' => 'offline', 'prompt' => 'consent'])
         ->redirect();
 });
@@ -19,19 +24,19 @@ Route::get('/auth/google', function () {
 Route::get('/auth/google/callback', function () {
     $googleUser = Socialite::driver('google')->stateless()->user();
 
-    // OJO: Socialite no siempre te da refresh_token si ya autorizaste antes.
-    // Por eso arriba forzamos prompt=consent + access_type=offline.
     $accessToken = $googleUser->token;
-    $refreshToken = $googleUser->refreshToken; // puede venir null si no fuerza consentimiento
-    $expiresIn = $googleUser->expiresIn;
+    $refreshToken = $googleUser->refreshToken; // puede venir null
+    $expiresIn = (int) ($googleUser->expiresIn ?? 0);
 
-    // Guardalo donde quieras (DB / .env no recomendado):
-    // ejemplo rápido: log
-    logger()->info('Google tokens', [
-        'access_token' => substr($accessToken, 0, 10).'...',
-        'refresh_token_present' => !empty($refreshToken),
-        'expires_in' => $expiresIn,
-    ]);
+    $integration = Integration::updateOrCreate(
+        ['provider' => 'google'],
+        [
+            'access_token' => $accessToken,
+            // si viene null, NO pises el refresh_token existente
+            'refresh_token' => $refreshToken ?: Integration::where('provider', 'google')->value('refresh_token'),
+            'expires_at' => $expiresIn ? now()->addSeconds($expiresIn) : null,
+        ]
+    );
 
-    return 'OK, tokens recibidos. Mirá logs.';
+    return 'OK, tokens guardados en DB.';
 });
