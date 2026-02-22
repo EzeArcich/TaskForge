@@ -5,7 +5,13 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "prepare": "husky"
+    "prepare": "husky",
+    "commit": "cz"
+  },
+    "config": {
+      "commitizen": {
+        "path": "cz-conventional-changelog"
+      }
   },
   "devDependencies": {
     "@commitlint/cli": "^20.4.2",
