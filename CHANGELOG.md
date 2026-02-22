@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/EzeArcich/TaskForge/compare/v0.2.0...v0.3.0) (2026-02-22)
+
+
+### Features
+
+* **scheduler:** enforce daily planning limits and avoid time overlaps ([ea02740](https://github.com/EzeArcich/TaskForge/commit/ea027408cdac65bee3de78be26832dc96fe13b81))
+* **scheduler:** enforce daily planning limits and avoid time overlaps ([ce21cc3](https://github.com/EzeArcich/TaskForge/commit/ce21cc385d6fa750b293884002a41db4146abc1f))
+
+
+### Bug Fixes
+
+* configure release-please target branch ([53e7298](https://github.com/EzeArcich/TaskForge/commit/53e72982fcc5d3b80282022a9e7a64342c57bb8f))
+
 ## [0.2.0](https://github.com/EzeArcich/TaskForge/compare/v0.1.0...v0.2.0) (2026-02-22)
 
 
