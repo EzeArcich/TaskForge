@@ -20,6 +20,7 @@ class RescheduleRequest extends FormRequest
             'availability.*.end' => ['required', 'string', 'regex:/^\d{2}:\d{2}$/'],
             'start_date' => 'required|date_format:Y-m-d',
             'hours_per_week' => 'required|numeric|min:0.5|max:80',
+            'max_minutes_per_day' => 'sometimes|integer|min:15|max:720',
         ];
     }
 }

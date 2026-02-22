@@ -9,6 +9,7 @@ final readonly class RescheduleDTO
         public array $availability,
         public string $startDate,
         public float $hoursPerWeek,
+        public int $maxMinutesPerDay,
     ) {}
 
     public static function fromRequest(array $data): self
@@ -20,6 +21,7 @@ final readonly class RescheduleDTO
             ),
             startDate: $data['start_date'],
             hoursPerWeek: (float) ($data['hours_per_week'] ?? 7.5),
+            maxMinutesPerDay: (int) ($data['max_minutes_per_day'] ?? config('dailypro.scheduler.default_max_minutes_per_day', 60)),
         );
     }
 }

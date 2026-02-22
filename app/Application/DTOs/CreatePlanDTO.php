@@ -13,6 +13,7 @@ final readonly class CreatePlanDTO
         public string $startDate,
         public array $availability,
         public float $hoursPerWeek,
+        public int $maxMinutesPerDay,
         public string $kanbanProvider,
         public string $calendarProvider,
         public bool $emailReminders,
@@ -31,6 +32,7 @@ final readonly class CreatePlanDTO
                 $settings['availability'] ?? []
             ),
             hoursPerWeek: (float) ($settings['hours_per_week'] ?? 7.5),
+            maxMinutesPerDay: (int) ($settings['max_minutes_per_day'] ?? config('dailypro.scheduler.default_max_minutes_per_day', 60)),
             kanbanProvider: $settings['kanban_provider'] ?? 'trello',
             calendarProvider: $settings['calendar_provider'] ?? 'google',
             emailReminders: Arr::get($settings, 'reminders.email', false),
@@ -44,6 +46,7 @@ final readonly class CreatePlanDTO
             'start_date' => $this->startDate,
             'availability' => array_map(fn (AvailabilitySlotDTO $s) => $s->toArray(), $this->availability),
             'hours_per_week' => $this->hoursPerWeek,
+            'max_minutes_per_day' => $this->maxMinutesPerDay,
             'kanban_provider' => $this->kanbanProvider,
             'calendar_provider' => $this->calendarProvider,
             'reminders' => ['email' => $this->emailReminders],

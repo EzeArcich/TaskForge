@@ -26,6 +26,8 @@ class SchedulerService
      * @param string $startDate Y-m-d
      * @param string $timezone
      * @param float $hoursPerWeek
+     * @param int $maxMinutesPerDay Per-day cap for planned focus minutes
+     * @param array<string, array<int, array{start: int, end: int}>> $occupiedSlotsByDate Existing occupied intervals
      * @return array{slots: array, warnings: array}
      */
     public function schedule(
@@ -34,6 +36,8 @@ class SchedulerService
         string $startDate,
         string $timezone,
         float $hoursPerWeek,
+        int $maxMinutesPerDay = 60,
+        array $occupiedSlotsByDate = [],
     ): array {
         $slots = [];
         $warnings = [];
@@ -45,7 +49,7 @@ class SchedulerService
             $weekNumber = $week['week'];
             $weekStart = $currentDate->addWeeks($weekNumber - 1)->startOfWeek(Carbon::MONDAY);
 
-            $weekSlots = $this->buildWeekSlots($weekStart, $availability, $timezone);
+            $weekSlots = $this->buildWeekSlots($weekStart, $availability, $maxMinutesPerDay, $occupiedSlotsByDate);
             $totalAvailableMinutes = array_sum(array_map(fn ($s) => $s['duration_minutes'], $weekSlots));
 
             $totalNeededMinutes = 0;
@@ -54,6 +58,7 @@ class SchedulerService
             }
 
             $effectiveAvailable = min($totalAvailableMinutes, $availableMinutesPerWeek);
+            $remainingWeekBudget = (int) $effectiveAvailable;
 
             if ($totalNeededMinutes > $effectiveAvailable) {
                 $warnings[] = [
@@ -74,7 +79,7 @@ class SchedulerService
             foreach ($week['tasks'] as $task) {
                 $remainingMinutes = (int) ($task['estimate_hours'] * 60);
 
-                while ($remainingMinutes > 0 && $slotIndex < count($weekSlots)) {
+                while ($remainingMinutes > 0 && $slotIndex < count($weekSlots) && $remainingWeekBudget > 0) {
                     $slot = $weekSlots[$slotIndex];
                     $availInSlot = $slot['duration_minutes'] - $slotUsedMinutes;
 
@@ -84,22 +89,22 @@ class SchedulerService
                         continue;
                     }
 
-                    $assigned = min($remainingMinutes, $availInSlot);
-
-                    $startTime = Carbon::parse($slot['start'], $timezone)->addMinutes($slotUsedMinutes);
-                    $endTime = (clone $startTime)->addMinutes($assigned);
+                    $assigned = min($remainingMinutes, $availInSlot, $remainingWeekBudget);
+                    $startMinutes = $slot['start_minutes'] + $slotUsedMinutes;
+                    $endMinutes = $startMinutes + $assigned;
 
                     $slots[] = [
                         'week' => $weekNumber,
                         'task_title' => $task['title'],
                         'date' => $slot['date'],
-                        'start' => $startTime->format('H:i'),
-                        'end' => $endTime->format('H:i'),
+                        'start' => $this->minutesToTime($startMinutes),
+                        'end' => $this->minutesToTime($endMinutes),
                         'minutes' => $assigned,
                     ];
 
                     $slotUsedMinutes += $assigned;
                     $remainingMinutes -= $assigned;
+                    $remainingWeekBudget -= $assigned;
 
                     if ($slotUsedMinutes >= $slot['duration_minutes']) {
                         $slotIndex++;
@@ -131,18 +136,23 @@ class SchedulerService
     /**
      * Build available time slots for a given week.
      *
-     * @return array<array{date: string, start: string, end: string, duration_minutes: int}>
+     * @param AvailabilitySlotDTO[] $availability
+     * @param array<string, array<int, array{start: int, end: int}>> $occupiedSlotsByDate
+     * @return array<array{date: string, start_minutes: int, duration_minutes: int}>
      */
     private function buildWeekSlots(
         CarbonImmutable $weekStart,
         array $availability,
-        string $timezone,
+        int $maxMinutesPerDay,
+        array $occupiedSlotsByDate,
     ): array {
-        $slots = [];
+        $slotsByDate = [];
 
         for ($dayOffset = 0; $dayOffset < 7; $dayOffset++) {
             $date = $weekStart->addDays($dayOffset);
+            $dateKey = $date->format('Y-m-d');
             $dayOfWeek = $date->dayOfWeekIso;
+            $rawSegments = [];
 
             foreach ($availability as $avail) {
                 $mappedDay = self::DAY_MAP[$avail->day] ?? null;
@@ -150,22 +160,125 @@ class SchedulerService
                     continue;
                 }
 
-                $duration = $avail->durationMinutes();
-                if ($duration <= 0) {
+                $startMinutes = $this->timeToMinutes($avail->start);
+                $endMinutes = $this->timeToMinutes($avail->end);
+                if ($endMinutes <= $startMinutes) {
                     continue;
                 }
 
-                $slots[] = [
-                    'date' => $date->format('Y-m-d'),
-                    'start' => $avail->start,
-                    'end' => $avail->end,
-                    'duration_minutes' => $duration,
+                $rawSegments[] = ['start' => $startMinutes, 'end' => $endMinutes];
+            }
+
+            if (empty($rawSegments)) {
+                continue;
+            }
+
+            usort($rawSegments, fn ($a, $b) => $a['start'] <=> $b['start']);
+
+            $occupied = $occupiedSlotsByDate[$dateKey] ?? [];
+            if (! empty($occupied)) {
+                usort($occupied, fn ($a, $b) => $a['start'] <=> $b['start']);
+            }
+
+            $freeSegments = [];
+            foreach ($rawSegments as $segment) {
+                foreach ($this->subtractOccupied($segment['start'], $segment['end'], $occupied) as $free) {
+                    if ($free['end'] > $free['start']) {
+                        $freeSegments[] = $free;
+                    }
+                }
+            }
+
+            if (empty($freeSegments)) {
+                continue;
+            }
+
+            usort($freeSegments, fn ($a, $b) => $a['start'] <=> $b['start']);
+
+            $dailyLimit = $maxMinutesPerDay > 0 ? $maxMinutesPerDay : PHP_INT_MAX;
+            $usedToday = 0;
+
+            foreach ($freeSegments as $segment) {
+                if ($usedToday >= $dailyLimit) {
+                    break;
+                }
+
+                $segmentDuration = $segment['end'] - $segment['start'];
+                $allowedDuration = min($segmentDuration, $dailyLimit - $usedToday);
+                if ($allowedDuration <= 0) {
+                    continue;
+                }
+
+                $slotsByDate[$dateKey][] = [
+                    'date' => $dateKey,
+                    'start_minutes' => $segment['start'],
+                    'duration_minutes' => $allowedDuration,
                 ];
+                $usedToday += $allowedDuration;
             }
         }
 
-        usort($slots, fn ($a, $b) => $a['date'] <=> $b['date'] ?: $a['start'] <=> $b['start']);
+        $slots = [];
+        ksort($slotsByDate);
+        foreach ($slotsByDate as $dailySlots) {
+            usort($dailySlots, fn ($a, $b) => $a['start_minutes'] <=> $b['start_minutes']);
+            foreach ($dailySlots as $slot) {
+                $slots[] = $slot;
+            }
+        }
 
         return $slots;
+    }
+
+    /**
+     * @param array<int, array{start: int, end: int}> $occupied
+     * @return array<int, array{start: int, end: int}>
+     */
+    private function subtractOccupied(int $start, int $end, array $occupied): array
+    {
+        $segments = [['start' => $start, 'end' => $end]];
+
+        foreach ($occupied as $block) {
+            $next = [];
+            foreach ($segments as $segment) {
+                if ($block['end'] <= $segment['start'] || $block['start'] >= $segment['end']) {
+                    $next[] = $segment;
+                    continue;
+                }
+
+                if ($block['start'] > $segment['start']) {
+                    $next[] = [
+                        'start' => $segment['start'],
+                        'end' => min($block['start'], $segment['end']),
+                    ];
+                }
+
+                if ($block['end'] < $segment['end']) {
+                    $next[] = [
+                        'start' => max($block['end'], $segment['start']),
+                        'end' => $segment['end'],
+                    ];
+                }
+            }
+            $segments = $next;
+            if (empty($segments)) {
+                break;
+            }
+        }
+
+        return $segments;
+    }
+
+    private function timeToMinutes(string $time): int
+    {
+        [$hours, $minutes] = array_map('intval', explode(':', substr($time, 0, 5)));
+        return ($hours * 60) + $minutes;
+    }
+
+    private function minutesToTime(int $minutes): string
+    {
+        $hours = intdiv($minutes, 60);
+        $mins = $minutes % 60;
+        return sprintf('%02d:%02d', $hours, $mins);
     }
 }

@@ -20,5 +20,9 @@ return [
         'access_token' => env('GOOGLE_ACCESS_TOKEN'),
     ],
 
+    'scheduler' => [
+        'default_max_minutes_per_day' => (int) env('DAILYPRO_DEFAULT_MAX_MINUTES_PER_DAY', 60),
+    ],
+
     'reminder_email' => env('DAILYPRO_REMINDER_EMAIL'),
 ];

@@ -4,6 +4,8 @@ namespace App\Infrastructure\Kanban;
 
 use App\Application\Contracts\KanbanProviderInterface;
 use App\Models\Plan;
+use App\Models\PlanTask;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -53,7 +55,7 @@ class TrelloProvider implements KanbanProviderInterface
                 'name' => $task->title,
                 'idList' => $listIds['Backlog'],
                 'desc' => sprintf('Estimate: %.1fh | Week: %d', $task->estimate_hours, $task->week?->week_number ?? 0),
-                'due' => $task->scheduled_date?->toIso8601String(),
+                'due' => $this->buildDueDateTime($plan, $task),
             ]);
             $cardIds[$task->id] = $card['id'];
         }
@@ -96,10 +98,24 @@ class TrelloProvider implements KanbanProviderInterface
         foreach ($plan->tasks as $task) {
             if ($task->trello_card_id && $task->scheduled_date) {
                 $this->request('PUT', "/cards/{$task->trello_card_id}", [
-                    'due' => $task->scheduled_date->toIso8601String(),
+                    'due' => $this->buildDueDateTime($plan, $task),
                 ]);
             }
         }
+    }
+
+    private function buildDueDateTime(Plan $plan, PlanTask $task): ?string
+    {
+        if (! $task->scheduled_date) {
+            return null;
+        }
+
+        $timezone = $plan->settings['timezone'] ?? 'UTC';
+        $time = $task->scheduled_start ?: '09:00:00';
+
+        return Carbon::parse($task->scheduled_date->format('Y-m-d') . ' ' . $time, $timezone)
+            ->utc()
+            ->toIso8601String();
     }
 
     public function getTodayCardIds(string $boardId): array

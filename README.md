@@ -207,6 +207,9 @@ GOOGLE_ACCESS_TOKEN=your-oauth-token
 
 # Email de recordatorio
 DAILYPRO_REMINDER_EMAIL=you@example.com
+
+# Scheduler (default global)
+DAILYPRO_DEFAULT_MAX_MINUTES_PER_DAY=60
 ```
 
 ### 5. Levantar servidor
@@ -234,6 +237,7 @@ php artisan serve & php artisan queue:work
 | `GOOGLE_REDIRECT_URI` | Si | URI de callback OAuth |
 | `GOOGLE_ACCESS_TOKEN` | No | Fallback opcional si no hay token en `integrations` |
 | `DAILYPRO_REMINDER_EMAIL` | No | Email para recordatorios diarios |
+| `DAILYPRO_DEFAULT_MAX_MINUTES_PER_DAY` | No | Tope diario por defecto para calendarizacion (minutos) |
 
 ---
 
@@ -316,6 +320,7 @@ curl -X POST http://localhost:8000/api/plans \
         {"day": "fri", "start": "20:00", "end": "21:30"}
       ],
       "hours_per_week": 7.5,
+      "max_minutes_per_day": 60,
       "kanban_provider": "trello",
       "calendar_provider": "google",
       "reminders": {"email": true}
@@ -336,6 +341,7 @@ curl -X POST http://localhost:8000/api/plans \
       "start_date": "2025-02-03",
       "availability": [...],
       "hours_per_week": 7.5,
+      "max_minutes_per_day": 60,
       "kanban_provider": "trello",
       "calendar_provider": "google",
       "reminders": {"email": true}
@@ -598,6 +604,8 @@ El scheduler distribuye tareas en los bloques de disponibilidad declarados:
 - Si una tarea no entra en un slot, la divide en multiples slots
 - Si la semana no tiene suficiente disponibilidad, emite un `warning` de tipo `overflow`
 - Si una tarea queda sin asignar, emite un `warning` de tipo `unscheduled`
+- Respeta `max_minutes_per_day` (por request o default global)
+- Evita solapamientos con tareas ya calendarizadas de otros planes en la misma fecha/hora
 
 ---
 
@@ -709,4 +717,3 @@ Feature (42 tests):
 - TrelloWebhookTest (9): HEAD, mark done, idempotent, ignore, auth, empty
 - DailyRunTest (2): today tasks, 404
 ```
-
