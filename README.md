@@ -12,7 +12,7 @@ DailyPro elimina la friccion entre "tengo un plan" y "lo estoy ejecutando". Reci
 
 - **Framework:** Laravel 12 (PHP 8.2+)
 - **DB:** MySQL (SQLite para tests)
-- **IA:** OpenAI API (gpt-4o-mini por defecto)
+- **IA:** OpenAI API (gpt-4o-mini por defecto, con fallback opcional por cuota)
 - **Kanban:** Trello API
 - **Calendar:** Google Calendar API (OAuth)
 - **Queue:** Database driver (configurable)
@@ -142,6 +142,14 @@ plan_tasks
 ├── trello_card_id (nullable)
 ├── google_event_id (nullable)
 └── timestamps
+
+integrations
+├── id (PK)
+├── provider (string, ej: google)
+├── access_token (text)
+├── refresh_token (text, nullable)
+├── expires_at (timestamp, nullable)
+└── timestamps
 ```
 
 ---
@@ -183,6 +191,7 @@ php artisan migrate
 # OpenAI
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
+DAILYPRO_OPENAI_QUOTA_FALLBACK=false
 
 # Trello (https://trello.com/power-ups/admin)
 TRELLO_KEY=your-trello-key
@@ -192,7 +201,8 @@ TRELLO_WEBHOOK_SECRET=optional-secret
 # Google Calendar
 GOOGLE_CLIENT_ID=your-client-id
 GOOGLE_CLIENT_SECRET=your-client-secret
-GOOGLE_REDIRECT_URI=http://localhost:8000/api/auth/google/callback
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
+# Opcional: fallback si no hay registro en integrations
 GOOGLE_ACCESS_TOKEN=your-oauth-token
 
 # Email de recordatorio
@@ -215,13 +225,14 @@ php artisan serve & php artisan queue:work
 |---|---|---|
 | `OPENAI_API_KEY` | Si | API key de OpenAI |
 | `OPENAI_MODEL` | No | Modelo a usar (default: gpt-4o-mini) |
+| `DAILYPRO_OPENAI_QUOTA_FALLBACK` | No | Si es `true`, ante 429/sin key usa normalizador local de fallback |
 | `TRELLO_KEY` | Si | Trello API key |
 | `TRELLO_TOKEN` | Si | Trello API token |
 | `TRELLO_WEBHOOK_SECRET` | No | Secret para validar webhooks |
 | `GOOGLE_CLIENT_ID` | Si | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Si | Google OAuth client secret |
 | `GOOGLE_REDIRECT_URI` | Si | URI de callback OAuth |
-| `GOOGLE_ACCESS_TOKEN` | Si | Access token obtenido via OAuth |
+| `GOOGLE_ACCESS_TOKEN` | No | Fallback opcional si no hay token en `integrations` |
 | `DAILYPRO_REMINDER_EMAIL` | No | Email para recordatorios diarios |
 
 ---
@@ -256,13 +267,17 @@ Tests usan SQLite in-memory y fakes para todas las integraciones externas (OpenA
 3. Habilitar **Google Calendar API**
 4. Ir a **Credentials** > **Create Credentials** > **OAuth 2.0 Client ID**
 5. Application type: **Web application**
-6. Authorized redirect URIs: `http://localhost:8000/api/auth/google/callback`
+6. Authorized redirect URIs: `http://localhost:8000/auth/google/callback`
 7. Copiar `Client ID` y `Client Secret` al `.env`
-8. Obtener access token via OAuth flow (puedes usar [OAuth Playground](https://developers.google.com/oauthplayground/)):
-   - Scopes: `https://www.googleapis.com/auth/calendar`
-   - Autorizar y copiar el access token al `.env` como `GOOGLE_ACCESS_TOKEN`
+8. Ejecutar OAuth local en el proyecto:
+   - Abrir `http://localhost:8000/auth/google`
+   - Completar consentimiento
+   - El callback `http://localhost:8000/auth/google/callback` guarda `access_token` + `refresh_token` en tabla `integrations`
 
-> En produccion usarias un refresh token flow. Para MVP, el access token manual es suficiente.
+Notas:
+- En publish, el provider de Google usa primero `integrations` y solo si falta usa `GOOGLE_ACCESS_TOKEN`.
+- Si Google responde 401, intenta refresh automatico con `refresh_token` y reintenta una vez.
+- Si prefieres flujo manual, puedes usar OAuth Playground y guardar `GOOGLE_ACCESS_TOKEN` en `.env` como fallback.
 
 ---
 
@@ -390,6 +405,11 @@ curl -X POST http://localhost:8000/api/plans \
 }
 ```
 
+**Modo fallback por cuota OpenAI (opcional):**
+- Si `DAILYPRO_OPENAI_QUOTA_FALLBACK=true`, cuando OpenAI devuelve 429 (quota) o falta `OPENAI_API_KEY`,
+  el sistema genera un `normalized_json` base local y continua el flujo (`201/200`) para pruebas end-to-end.
+- Este modo es para desarrollo/testing; en produccion se recomienda usar normalizacion real con OpenAI.
+
 ---
 
 ### 2. Consultar plan (GET /api/plans/{id})
@@ -471,6 +491,10 @@ curl -X POST http://localhost:8000/api/plans/1/publish \
   "detail": "Trello API returned 401 Unauthorized"
 }
 ```
+
+Notas de diagnostico rapido:
+- Si `publish_status=published` y existen `trello_card_id`/`google_event_id` en tareas, la publicacion fue exitosa.
+- Las tarjetas de Trello se crean en la lista **Backlog** del board nuevo.
 
 ---
 
@@ -614,6 +638,56 @@ Errores siguen estilo "Problem Details":
 
 ---
 
+## Troubleshooting rapido
+
+### 1) `POST /api/plans` devuelve 429 (OpenAI quota)
+
+**Sintoma:** `normalization_error` con detalle `OpenAI API returned status 429` o `You exceeded your current quota`.
+
+**Solucion:**
+- Activar fallback local en `.env`:
+  - `DAILYPRO_OPENAI_QUOTA_FALLBACK=true`
+- Limpiar cache y reiniciar:
+  - `php artisan optimize:clear`
+  - reiniciar `php artisan serve` / `composer run dev`
+
+Con eso, si OpenAI no responde por cuota, se genera `normalized_json` local y el plan se crea igual.
+
+### 2) `POST /api/plans/{id}/publish` devuelve 401 (Google)
+
+**Sintoma:** `publish_error` con `invalid authentication credentials`.
+
+**Causa comun:** access token vencido o invalido.
+
+**Solucion:**
+- Verificar `integrations` (`provider=google`) con `refresh_token` cargado.
+- Verificar `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` en `.env`.
+- Reintentar publish: el sistema refresca token automaticamente y reintenta una vez.
+- Si falla con `invalid_grant`, reautorizar en:
+  - `http://localhost:8000/auth/google`
+
+### 3) `POST /api/plans/{id}/publish` devuelve 400 (Google badRequest)
+
+**Sintoma:** `publish_error` con `HTTP request returned status code 400` desde Calendar.
+
+**Solucion:**
+- Asegurarte de estar corriendo la version actual (incluye normalizacion de `dateTime` para Google Calendar).
+- Reiniciar app despues de pull/cambios:
+  - `php artisan optimize:clear`
+  - reiniciar `php artisan serve` / `composer run dev`
+
+### 4) Publish responde `published` pero “no veo cards” en Trello
+
+**Chequeo rapido:**
+- Consultar `GET /api/plans/{id}` y validar:
+  - `publication.trello.published = true`
+  - `publication.trello.board_url` presente
+  - `weeks[].tasks[].trello_card_id` presente
+
+**Nota:** Las tarjetas se crean en la lista **Backlog** del board generado.
+
+---
+
 ## Tests
 
 ```
@@ -635,4 +709,3 @@ Feature (42 tests):
 - TrelloWebhookTest (9): HEAD, mark done, idempotent, ignore, auth, empty
 - DailyRunTest (2): today tasks, 404
 ```
-
