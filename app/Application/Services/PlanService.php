@@ -235,8 +235,8 @@ class PlanService
 
     private function persistWeeksAndTasks(Plan $plan, array $normalizedJson, array $scheduleResult): void
     {
-        $slotsByTask = collect($scheduleResult['slots'] ?? [])
-            ->groupBy('task_title');
+        $slotsByWeekAndTask = collect($scheduleResult['slots'] ?? [])
+            ->groupBy(fn (array $slot) => $this->slotKey((int) ($slot['week'] ?? 0), (string) ($slot['task_title'] ?? '')));
 
         foreach ($normalizedJson['weeks'] as $weekData) {
             $week = $plan->weeks()->create([
@@ -245,7 +245,10 @@ class PlanService
             ]);
 
             foreach ($weekData['tasks'] as $taskData) {
-                $taskSlots = $slotsByTask->get($taskData['title'], collect());
+                $taskSlots = $slotsByWeekAndTask->get(
+                    $this->slotKey((int) $weekData['week'], (string) $taskData['title']),
+                    collect()
+                );
                 $firstSlot = $taskSlots->first();
 
                 $plan->tasks()->create([
@@ -263,11 +266,16 @@ class PlanService
 
     private function updateTaskSchedules(Plan $plan, array $scheduleResult): void
     {
-        $slotsByTask = collect($scheduleResult['slots'] ?? [])
-            ->groupBy('task_title');
+        $slotsByWeekAndTask = collect($scheduleResult['slots'] ?? [])
+            ->groupBy(fn (array $slot) => $this->slotKey((int) ($slot['week'] ?? 0), (string) ($slot['task_title'] ?? '')));
+        $weekNumberById = $plan->weeks()->pluck('week_number', 'id');
 
         foreach ($plan->tasks as $task) {
-            $taskSlots = $slotsByTask->get($task->title, collect());
+            $weekNumber = (int) ($weekNumberById[$task->plan_week_id] ?? 0);
+            $taskSlots = $slotsByWeekAndTask->get(
+                $this->slotKey($weekNumber, (string) $task->title),
+                collect()
+            );
             $firstSlot = $taskSlots->first();
 
             $task->update([
@@ -276,5 +284,10 @@ class PlanService
                 'scheduled_end' => $firstSlot ? $firstSlot['end'] : null,
             ]);
         }
+    }
+
+    private function slotKey(int $week, string $taskTitle): string
+    {
+        return $week . '|' . $taskTitle;
     }
 }

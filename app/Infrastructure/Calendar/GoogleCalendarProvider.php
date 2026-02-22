@@ -3,7 +3,9 @@
 namespace App\Infrastructure\Calendar;
 
 use App\Application\Contracts\CalendarProviderInterface;
+use App\Models\Integration;
 use App\Models\Plan;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -13,7 +15,6 @@ class GoogleCalendarProvider implements CalendarProviderInterface
 
     public function createEvents(Plan $plan): array
     {
-        $accessToken = $this->getAccessToken();
         $timezone = $plan->settings['timezone'] ?? 'UTC';
         $calendarId = 'primary';
         $eventIds = [];
@@ -25,10 +26,10 @@ class GoogleCalendarProvider implements CalendarProviderInterface
                 continue;
             }
 
-            $startDateTime = $task->scheduled_date->format('Y-m-d') . 'T' . $task->scheduled_start . ':00';
-            $endDateTime = $task->scheduled_date->format('Y-m-d') . 'T' . $task->scheduled_end . ':00';
+            $startDateTime = $this->toGoogleDateTime($task->scheduled_date->format('Y-m-d'), (string) $task->scheduled_start);
+            $endDateTime = $this->toGoogleDateTime($task->scheduled_date->format('Y-m-d'), (string) $task->scheduled_end);
 
-            $event = $this->request($accessToken, 'POST', "/calendars/{$calendarId}/events", [
+            $event = $this->request('POST', "/calendars/{$calendarId}/events", [
                 'summary' => 'Deep Work: ' . $task->title,
                 'description' => sprintf(
                     "DailyPro Task\nEstimate: %.1fh\nPlan: %s",
@@ -67,7 +68,6 @@ class GoogleCalendarProvider implements CalendarProviderInterface
 
     public function updateEvents(Plan $plan): void
     {
-        $accessToken = $this->getAccessToken();
         $timezone = $plan->settings['timezone'] ?? 'UTC';
         $calendarId = $plan->google_calendar_id ?? 'primary';
 
@@ -78,10 +78,10 @@ class GoogleCalendarProvider implements CalendarProviderInterface
                 continue;
             }
 
-            $startDateTime = $task->scheduled_date->format('Y-m-d') . 'T' . $task->scheduled_start . ':00';
-            $endDateTime = $task->scheduled_date->format('Y-m-d') . 'T' . $task->scheduled_end . ':00';
+            $startDateTime = $this->toGoogleDateTime($task->scheduled_date->format('Y-m-d'), (string) $task->scheduled_start);
+            $endDateTime = $this->toGoogleDateTime($task->scheduled_date->format('Y-m-d'), (string) $task->scheduled_end);
 
-            $this->request($accessToken, 'PUT', "/calendars/{$calendarId}/events/{$task->google_event_id}", [
+            $this->request('PUT', "/calendars/{$calendarId}/events/{$task->google_event_id}", [
                 'summary' => 'Deep Work: ' . $task->title,
                 'start' => [
                     'dateTime' => $startDateTime,
@@ -97,7 +97,6 @@ class GoogleCalendarProvider implements CalendarProviderInterface
 
     public function deleteEvents(Plan $plan): void
     {
-        $accessToken = $this->getAccessToken();
         $calendarId = $plan->google_calendar_id ?? 'primary';
 
         $plan->load('tasks');
@@ -108,7 +107,7 @@ class GoogleCalendarProvider implements CalendarProviderInterface
             }
 
             try {
-                $this->request($accessToken, 'DELETE', "/calendars/{$calendarId}/events/{$task->google_event_id}");
+                $this->request('DELETE', "/calendars/{$calendarId}/events/{$task->google_event_id}");
             } catch (\Throwable $e) {
                 Log::warning('Failed to delete calendar event', [
                     'event_id' => $task->google_event_id,
@@ -120,31 +119,46 @@ class GoogleCalendarProvider implements CalendarProviderInterface
 
     private function getAccessToken(): string
     {
-        // In production, this would use OAuth refresh token flow.
-        // For MVP, we use a stored access token from config/session.
-        $token = config('dailypro.google.access_token');
+        // Prefer token from integrations table (OAuth callback), fallback to .env.
+        $integrationToken = $this->getGoogleIntegration()?->access_token;
+
+        $token = $integrationToken ?: config('dailypro.google.access_token');
         if (! $token) {
-            throw new \RuntimeException('Google Calendar access token not configured. Complete OAuth flow first.');
+            throw new \RuntimeException('Google Calendar access token not configured in integrations table or .env. Complete OAuth flow first.');
         }
 
         return $token;
     }
 
-    private function request(string $accessToken, string $method, string $path, array $data = []): array
+    private function request(string $method, string $path, array $data = []): array
     {
         $url = $this->baseUrl . $path;
+        $integration = $this->getGoogleIntegration();
 
-        $response = Http::withHeaders([
-            'Authorization' => 'Bearer ' . $accessToken,
-        ])->retry(2, 500);
+        // Proactive refresh if token is known to be expired.
+        if ($integration?->expires_at && now()->greaterThanOrEqualTo($integration->expires_at->subMinute())) {
+            Log::info('Google access token expired. Attempting proactive refresh.', [
+                'integration_id' => $integration->id,
+                'expires_at' => $integration->expires_at?->toDateTimeString(),
+            ]);
+            $this->refreshAccessToken($integration);
+        }
 
-        $response = match ($method) {
-            'GET' => $response->get($url, $data),
-            'POST' => $response->post($url, $data),
-            'PUT' => $response->put($url, $data),
-            'DELETE' => $response->delete($url),
-            default => throw new \InvalidArgumentException("Unsupported method: {$method}"),
-        };
+        $response = $this->sendRequest($this->getAccessToken(), $method, $url, $data);
+
+        // If access token expired, refresh once and retry.
+        if ($response->status() === 401) {
+            Log::warning('Google API returned 401. Attempting token refresh.', [
+                'method' => $method,
+                'path' => $path,
+            ]);
+            $refreshedToken = $this->refreshAccessToken($integration);
+            if ($refreshedToken) {
+                $response = $this->sendRequest($refreshedToken, $method, $url, $data);
+            } else {
+                Log::warning('Google token refresh unavailable or failed; keeping original 401 response.');
+            }
+        }
 
         if ($method === 'DELETE' && $response->successful()) {
             return [];
@@ -153,5 +167,106 @@ class GoogleCalendarProvider implements CalendarProviderInterface
         $response->throw();
 
         return $response->json() ?? [];
+    }
+
+    private function sendRequest(string $accessToken, string $method, string $url, array $data = [])
+    {
+        $client = Http::withHeaders([
+            'Authorization' => 'Bearer ' . $accessToken,
+        ])->retry(2, 500);
+
+        return match ($method) {
+            'GET' => $client->get($url, $data),
+            'POST' => $client->post($url, $data),
+            'PUT' => $client->put($url, $data),
+            'DELETE' => $client->delete($url),
+            default => throw new \InvalidArgumentException("Unsupported method: {$method}"),
+        };
+    }
+
+    private function refreshAccessToken(?Integration $integration = null): ?string
+    {
+        $integration ??= $this->getGoogleIntegration();
+        $refreshToken = $integration?->refresh_token;
+        if (! $integration || ! $refreshToken) {
+            Log::warning('Google token refresh skipped: missing integration or refresh_token.');
+            return null;
+        }
+
+        $clientId = (string) config('services.google.client_id');
+        $clientSecret = (string) config('services.google.client_secret');
+        if ($clientId === '' || $clientSecret === '') {
+            Log::warning('Google token refresh skipped: missing client_id/client_secret in config.');
+            return null;
+        }
+
+        $response = Http::asForm()
+            ->retry(1, 500)
+            ->post('https://oauth2.googleapis.com/token', [
+                'client_id' => $clientId,
+                'client_secret' => $clientSecret,
+                'refresh_token' => $refreshToken,
+                'grant_type' => 'refresh_token',
+            ]);
+
+        if ($response->failed()) {
+            Log::warning('Google token refresh failed', [
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+            return null;
+        }
+
+        $newAccessToken = (string) $response->json('access_token');
+        if ($newAccessToken === '') {
+            return null;
+        }
+
+        $expiresIn = (int) ($response->json('expires_in') ?? 0);
+        $integration->update([
+            'access_token' => $newAccessToken,
+            'refresh_token' => $response->json('refresh_token') ?: $integration->refresh_token,
+            'expires_at' => $expiresIn > 0 ? now()->addSeconds($expiresIn) : $integration->expires_at,
+        ]);
+
+        Log::info('Google access token refreshed successfully.', [
+            'integration_id' => $integration->id,
+            'expires_in' => $expiresIn,
+        ]);
+
+        return $newAccessToken;
+    }
+
+    private function getGoogleIntegration(): ?Integration
+    {
+        $withRefresh = Integration::query()
+            ->where('provider', 'google')
+            ->whereNotNull('refresh_token')
+            ->orderByDesc('updated_at')
+            ->first();
+
+        if ($withRefresh) {
+            return $withRefresh;
+        }
+
+        return Integration::query()
+            ->whereIn('provider', ['google', 'google_calendar'])
+            ->orderByDesc('updated_at')
+            ->first();
+    }
+
+    private function toGoogleDateTime(string $date, string $time): string
+    {
+        $normalizedTime = trim($time);
+
+        foreach (['Y-m-d H:i:s', 'Y-m-d H:i'] as $format) {
+            try {
+                return Carbon::createFromFormat($format, $date . ' ' . $normalizedTime)->format('Y-m-d\TH:i:s');
+            } catch (\Throwable) {
+                // try next format
+            }
+        }
+
+        throw new \InvalidArgumentException("Invalid task time format: {$time}");
     }
 }

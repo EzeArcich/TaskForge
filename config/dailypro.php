@@ -4,6 +4,7 @@ return [
     'openai' => [
         'api_key' => env('OPENAI_API_KEY'),
         'model' => env('OPENAI_MODEL', 'gpt-4o-mini'),
+        'quota_fallback_enabled' => env('DAILYPRO_OPENAI_QUOTA_FALLBACK', false),
     ],
 
     'trello' => [
