@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# No-op por ahora. Agregar checks reales cuando se definan scripts de calidad.
+exit 0
