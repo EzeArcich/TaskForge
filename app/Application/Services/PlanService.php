@@ -14,6 +14,7 @@ use App\Domain\Enums\ValidationStatus;
 use App\Exceptions\NormalizationFailedException;
 use App\Models\Plan;
 use App\Models\PlanTask;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -46,12 +47,20 @@ class PlanService
         $normalizedJson = $this->normalizeWithRetries($dto->planText, $dto->timezone, $dto->startDate);
 
         // Schedule tasks
+        $occupiedSlotsByDate = $this->getOccupiedSlotsByDate(
+            $dto->startDate,
+            $dto->timezone,
+            $normalizedJson,
+        );
+
         $scheduleResult = $this->scheduler->schedule(
             $normalizedJson,
             $dto->availability,
             $dto->startDate,
             $dto->timezone,
             $dto->hoursPerWeek,
+            $dto->maxMinutesPerDay,
+            $occupiedSlotsByDate,
         );
 
         // Persist everything in a transaction
@@ -104,6 +113,9 @@ class PlanService
                 foreach ($kanbanResult['card_ids'] as $taskId => $cardId) {
                     PlanTask::where('id', $taskId)->update(['trello_card_id' => $cardId]);
                 }
+            } else {
+                // Plan already connected to Trello: refresh due dates after reschedule/updates.
+                $kanban->updateCardDueDates($plan);
             }
 
             // Calendar
@@ -116,6 +128,9 @@ class PlanService
                 foreach ($calendarResult['event_ids'] as $taskId => $eventId) {
                     PlanTask::where('id', $taskId)->update(['google_event_id' => $eventId]);
                 }
+            } else {
+                // Plan already connected to Calendar: refresh event datetimes after reschedule/updates.
+                $calendar->updateEvents($plan);
             }
 
             $plan->update(['publish_status' => PlanStatus::Published->value]);
@@ -135,19 +150,31 @@ class PlanService
     {
         $normalizedJson = $plan->normalized_json;
         $settings = $plan->settings;
+        $timezone = $settings['timezone'] ?? 'UTC';
+        $maxMinutesPerDay = $dto->maxMinutesPerDay ?: (int) ($settings['max_minutes_per_day'] ?? config('dailypro.scheduler.default_max_minutes_per_day', 60));
+
+        $occupiedSlotsByDate = $this->getOccupiedSlotsByDate(
+            $dto->startDate,
+            $timezone,
+            $normalizedJson,
+            $plan->id,
+        );
 
         $scheduleResult = $this->scheduler->schedule(
             $normalizedJson,
             $dto->availability,
             $dto->startDate,
-            $settings['timezone'] ?? 'UTC',
+            $timezone,
             $dto->hoursPerWeek,
+            $maxMinutesPerDay,
+            $occupiedSlotsByDate,
         );
 
         // Update settings
         $settings['availability'] = array_map(fn (AvailabilitySlotDTO $s) => $s->toArray(), $dto->availability);
         $settings['start_date'] = $dto->startDate;
         $settings['hours_per_week'] = $dto->hoursPerWeek;
+        $settings['max_minutes_per_day'] = $maxMinutesPerDay;
 
         DB::transaction(function () use ($plan, $settings, $scheduleResult) {
             $plan->update([
@@ -289,5 +316,57 @@ class PlanService
     private function slotKey(int $week, string $taskTitle): string
     {
         return $week . '|' . $taskTitle;
+    }
+
+    /**
+     * Build occupied time intervals from existing tasks in DB.
+     *
+     * @return array<string, array<int, array{start: int, end: int}>>
+     */
+    private function getOccupiedSlotsByDate(
+        string $startDate,
+        string $timezone,
+        array $normalizedJson,
+        ?int $excludePlanId = null,
+    ): array {
+        $maxWeek = (int) collect($normalizedJson['weeks'] ?? [])->max('week');
+        if ($maxWeek <= 0) {
+            return [];
+        }
+
+        $rangeStart = CarbonImmutable::parse($startDate, $timezone)->startOfWeek(\Carbon\Carbon::MONDAY);
+        $rangeEnd = $rangeStart->addWeeks($maxWeek)->subDay();
+
+        $tasksQuery = PlanTask::query()
+            ->whereNotNull('scheduled_date')
+            ->whereNotNull('scheduled_start')
+            ->whereNotNull('scheduled_end')
+            ->where('status', '!=', TaskStatus::Done->value)
+            ->whereBetween('scheduled_date', [$rangeStart->toDateString(), $rangeEnd->toDateString()]);
+
+        if ($excludePlanId) {
+            $tasksQuery->where('plan_id', '!=', $excludePlanId);
+        }
+
+        $tasks = $tasksQuery->get(['scheduled_date', 'scheduled_start', 'scheduled_end']);
+
+        $occupied = [];
+        foreach ($tasks as $task) {
+            $date = $task->scheduled_date->format('Y-m-d');
+            $start = $this->timeToMinutes((string) $task->scheduled_start);
+            $end = $this->timeToMinutes((string) $task->scheduled_end);
+            if ($end <= $start) {
+                continue;
+            }
+            $occupied[$date][] = ['start' => $start, 'end' => $end];
+        }
+
+        return $occupied;
+    }
+
+    private function timeToMinutes(string $time): int
+    {
+        [$hours, $minutes] = array_map('intval', explode(':', substr($time, 0, 5)));
+        return ($hours * 60) + $minutes;
     }
 }

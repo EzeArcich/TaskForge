@@ -23,6 +23,7 @@ class CreatePlanRequest extends FormRequest
             'settings.availability.*.start' => ['required', 'string', 'regex:/^\d{2}:\d{2}$/'],
             'settings.availability.*.end' => ['required', 'string', 'regex:/^\d{2}:\d{2}$/'],
             'settings.hours_per_week' => 'required|numeric|min:0.5|max:80',
+            'settings.max_minutes_per_day' => 'sometimes|integer|min:15|max:720',
             'settings.kanban_provider' => 'sometimes|string|in:trello',
             'settings.calendar_provider' => 'sometimes|string|in:google',
             'settings.reminders' => 'sometimes|array',
